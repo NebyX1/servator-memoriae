@@ -1,0 +1,40 @@
+# Configuración privada y estado de cada instalación
+.env
+.env.*
+!.env.example
+.device
+.agent-report.json
+
+# Documentos, bases, copias de seguridad y modelos descargados
+/data/
+/backups/
+/models/
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+*.gguf
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pem
+*.key
+
+# Entornos, dependencias y resultados generados
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+*.tsbuildinfo
+*.log
+.DS_Store
+Thumbs.db
