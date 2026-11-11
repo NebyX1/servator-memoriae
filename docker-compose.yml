@@ -1,0 +1,265 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-servator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-servator}
+      POSTGRES_DB: ${POSTGRES_DB:-servator}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-servator} -d $${POSTGRES_DB:-servator}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: redis:7.4
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # S3 local opcional (perfil s3). Por defecto se usa almacenamiento en
+  # filesystem (S3_USE_LOCAL=1): reproducible sin pulls extra.
+  # Uso: docker compose --profile s3 up -d  +  S3_USE_LOCAL=0 S3_ENDPOINT=http://s3mock:9090
+  s3mock:
+    image: adobe/s3mock:5.2.3
+    profiles: ["s3"]
+    restart: unless-stopped
+    environment:
+      initialBuckets: ${S3_BUCKET:-servator}
+    volumes:
+      - s3mock-data:/s3mockroot
+    networks:
+      - outbound
+
+  init:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      FLASK_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://s3mock:9090}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-servator}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_USE_LOCAL: ${S3_USE_LOCAL:-1}
+      SECRET_KEY: ${SECRET_KEY}
+    networks:
+      - internal
+      - outbound
+    volumes:
+      - servator-data:/data
+      - model-cache:/models
+    command: ["init-only"]
+
+  backend:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+    restart: unless-stopped
+    user: "10001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    environment:
+      FLASK_ENV: ${FLASK_ENV:-production}
+      LOCAL_TEST_MODE: ${LOCAL_TEST_MODE:-0}
+      FRONT_BIND: ${FRONT_BIND:-127.0.0.1}
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://s3mock:9090}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-servator}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_USE_LOCAL: ${S3_USE_LOCAL:-1}
+      DATA_DIR: /data
+      MODEL_DIR: /models
+      MODEL_CACHE_DIR: /models/cache
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-512}
+      DEVICE_MODE: ${DEVICE_MODE:-cpu}
+      RQ_QUEUE: ${RQ_QUEUE:-servator}
+      RQ_GPU_QUEUE: ${RQ_GPU_QUEUE:-servator-gpu}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8787}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@local}
+      SECRET_KEY: ${SECRET_KEY}
+    volumes:
+      - servator-data:/data
+      - model-cache:/models
+    networks:
+      - internal
+      - outbound
+    command: ["gunicorn", "-c", "gunicorn.conf.py", "wsgi:app"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://localhost:5000/health',timeout=5)\""]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+
+  worker:
+    build:
+      context: .
+      dockerfile: ./worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      FLASK_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://s3mock:9090}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-servator}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_USE_LOCAL: ${S3_USE_LOCAL:-1}
+      DATA_DIR: /data
+      MODEL_DIR: /models
+      MODEL_CACHE_DIR: /models/cache
+      DEVICE_MODE: cpu
+      RQ_QUEUE: ${RQ_QUEUE:-servator}
+      SECRET_KEY: ${SECRET_KEY}
+      TORCH_DEVICE: cpu
+    volumes:
+      - servator-data:/data
+      - model-cache:/models
+    networks:
+      - internal
+      - outbound
+    command: ["python", "/app/worker/run.py"]
+
+  # El descargador usa una cola separada: Kraken sigue operativo durante la preparación.
+  worker-setup:
+    build:
+      context: .
+      dockerfile: ./worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      FLASK_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      S3_USE_LOCAL: ${S3_USE_LOCAL:-1}
+      DATA_DIR: /data
+      MODEL_DIR: /models
+      DEVICE_MODE: cpu
+      SECRET_KEY: ${SECRET_KEY}
+    volumes:
+      - servator-data:/data
+      - model-cache:/models
+    networks:
+      - internal
+      - outbound
+    command: ["python", "/app/worker/run.py", "--queue", "servator-setup"]
+
+  # Una única instancia del lector, aislada de Kraken y sin puerto público.
+  paddle:
+    build:
+      context: .
+      dockerfile: ./paddle_service/Dockerfile
+      additional_contexts:
+        worker_base: service:worker
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /data
+      MODEL_DIR: /models
+      PADDLE_GPU_ENABLED: "0"
+    command: ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "4", "--timeout", "0", "paddle_service.server:app"]
+    volumes:
+      - model-cache:/models:ro
+      - servator-data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=5)\""]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
+
+  dispatcher:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+    restart: unless-stopped
+    user: "10001"
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      FLASK_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      SECRET_KEY: ${SECRET_KEY}
+      RQ_QUEUE: ${RQ_QUEUE:-servator}
+      RQ_GPU_QUEUE: ${RQ_GPU_QUEUE:-servator-gpu}
+      DEVICE_MODE: ${DEVICE_MODE:-cpu}
+    networks:
+      - internal
+      - outbound
+    command: ["python", "/app/scripts_dispatch.py"]
+    healthcheck:
+      test: ["CMD-SHELL", "ps aux | grep -v grep | grep scripts_dispatch || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: ./frontend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONT_BIND:-127.0.0.1}:${FRONT_PORT:-8787}:80"
+    networks:
+      - outbound
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+networks:
+  internal:
+    internal: true
+  outbound:
+
+volumes:
+  pgdata:
+  redisdata:
+  s3mock-data:
+  servator-data:
+  model-cache:

@@ -1,0 +1,40 @@
+# Worker GPU: torch 2.14.0+cu130 + kraken 7.1.1 (Blackwell / sm_120 ready).
+# Requiere NVIDIA Container Toolkit. No usar sin GPU.
+# Las ruedas cu130 ya incluyen sus dependencias CUDA; el toolkit del host no se
+# copia a la imagen. El runtime NVIDIA aporta el driver al ejecutar el worker.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONPATH=/app:/app/engine \
+    TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev build-essential curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 10001 servator
+
+WORKDIR /app
+
+COPY backend/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu130 \
+      "torch==2.14.0+cu130" "torchvision==0.29.0+cu130" \
+ && pip install --no-cache-dir -r /tmp/requirements.txt \
+ && pip install --no-cache-dir "kraken==7.1.1" \
+ && python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
+
+COPY backend/requirements-word.txt /tmp/requirements-word.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-word.txt
+
+COPY backend/ /app/backend/
+COPY engine/ /app/engine/
+COPY worker/run.py /app/worker/run.py
+
+RUN chown -R servator:servator /app
+USER servator
+WORKDIR /app/backend
+CMD ["python", "/app/worker/run.py", "--queue", "servator-gpu"]

@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.git
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+frontend/dist
+backups
+data
+.agent-report.json
+frontend/test-results
+frontend/playwright-report
